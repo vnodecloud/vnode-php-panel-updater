@@ -32,11 +32,10 @@ Script yêu cầu quyền root và hiển thị câu hỏi xác nhận trước 
 
 ## Control panel nhận diện
 
-DirectAdmin, CyberPanel, aaPanel, VestaCP, CloudPanel, FastPanel, HestiaCP và Webmin. CWP không nằm trong phạm vi hỗ trợ.
+DirectAdmin, CyberPanel, aaPanel, VestaCP, CloudPanel, FastPanel, HestiaCP và Webmin. 
 
 ## Lưu ý
 
-- DirectAdmin CustomBuild không được gọi. Nếu PHP source-managed của DirectAdmin cần CustomBuild để cập nhật, script sẽ dừng an toàn thay vì cập nhật runtime đó.
 - Script chỉ quét các đường dẫn PHP đã biết. Runtime được cài ở đường dẫn tùy chỉnh có thể không được phát hiện.
 - Các phiên bản mới nhất được xác định theo kho package mà hệ điều hành đang cấu hình. Với PHP do aaPanel quản lý riêng, script tra phiên bản phát hành PHP và xác minh kết quả sau khi updater chạy.
 - Lệnh chạy nhanh lấy nội dung hiện tại trên nhánh `main`. Để khách hàng dùng một bản cố định, hãy phát hành GitHub Release/tag và đổi `main` trong URL thành tag, ví dụ `v1.0.0`.
