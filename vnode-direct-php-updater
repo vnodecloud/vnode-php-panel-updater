@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -o pipefail
+export LC_ALL=C
+
+progress() { printf '\n[%s] %s\n' "$1" "$2"; }
+fail() { echo "LỖI: $*" >&2; exit 1; }
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "hãy chạy bằng quyền root (sudo bash $0)."
+if command -v flock >/dev/null 2>&1; then
+    exec 9>/run/lock/vnode-direct-php-updater.lock
+    flock -n 9 || fail "đang có một phiên cập nhật PHP khác chạy."
+fi
+
+progress 'BƯỚC 1/7' 'Kiểm tra DirectAdmin và hệ điều hành'
+[[ -x /usr/local/directadmin/directadmin || -d /usr/local/directadmin/data ]] || { echo "Không hỗ trợ: không phát hiện DirectAdmin."; exit 2; }
+if [[ -r /etc/os-release ]]; then . /etc/os-release; OS_NAME="${PRETTY_NAME:-${NAME:-Linux}}"; else OS_NAME="Linux"; fi
+DA_VERSION="không rõ"
+for arg in version v; do
+    out=$(/usr/local/directadmin/directadmin "$arg" 2>/dev/null | head -n1 || true)
+    if [[ -n "$out" && "$out" != Usage:* ]]; then DA_VERSION="$out"; break; fi
+done
+echo "Hệ điều hành  : $OS_NAME"
+echo "Control panel : DirectAdmin ($DA_VERSION)"
+
+progress 'BƯỚC 2/7' 'Phát hiện các PHP runtime và cách chúng được cài'
+declare -a RUNTIMES=() UNMANAGED=() DA_SOURCE=()
+add_runtime() {
+    local bin="$1" ver real owner entry old
+    [[ -x "$bin" ]] || return 0
+    ver=$("$bin" -n -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION.".".PHP_RELEASE_VERSION;' 2>/dev/null | head -n1)
+    [[ -n "$ver" ]] || ver="không rõ"
+    entry="$ver|$bin"
+    for old in "${RUNTIMES[@]:-}"; do [[ "$old" == "$entry" ]] && return 0; done
+    RUNTIMES+=("$entry")
+    real=$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")
+    owner=""
+    if command -v rpm >/dev/null 2>&1; then owner=$(rpm -qf "$real" 2>/dev/null || true)
+    elif command -v dpkg-query >/dev/null 2>&1; then owner=$(dpkg-query -S "$real" 2>/dev/null | head -n1 || true); fi
+    if [[ "$bin" == /usr/local/php*/bin/php ]]; then
+        DA_SOURCE+=("$ver|$bin")
+    elif [[ -z "$owner" ]]; then
+        UNMANAGED+=("$ver|$bin")
+    fi
+}
+for bin in /usr/local/lsws/lsphp*/bin/php /usr/local/php*/bin/php /opt/alt/php*/usr/bin/php /usr/bin/php[0-9].[0-9]; do
+    [[ -e "$bin" ]] && add_runtime "$bin"
+done
+if command -v php >/dev/null 2>&1; then add_runtime "$(command -v php)"; fi
+if ((${#RUNTIMES[@]})); then
+    printf '%-14s %s\n' 'PHP HIỆN TẠI' 'BINARY'
+    for entry in "${RUNTIMES[@]}"; do IFS='|' read -r ver bin <<< "$entry"; printf '%-14s %s\n' "$ver" "$bin"; done
+else
+    echo "Không thấy binary PHP ở các đường dẫn phổ biến của DirectAdmin. Script vẫn sẽ rà package PHP đã cài."
+fi
+
+progress 'BƯỚC 3/7' 'Làm mới kho và tìm bản mới cho package PHP đang cài'
+declare -a NAMES=() CURRENT=() LATEST=() LABELS=() UPDATES=() BLOCKS=()
+pkg_label() {
+    local n="$1"
+    if [[ "$n" =~ ^lsphp([0-9]{2}) ]]; then echo "${BASH_REMATCH[1]:0:1}.${BASH_REMATCH[1]:1:1}"
+    elif [[ "$n" =~ ^(ea-php|alt-php)([0-9])([0-9]) ]]; then echo "${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+    elif [[ "$n" =~ ^php([0-9])\.([0-9]) ]]; then echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+    elif [[ "$n" =~ ^php([0-9])([0-9])($|-) ]]; then echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+    else echo "system"; fi
+}
+if command -v rpm >/dev/null 2>&1; then
+    PM=dnf; command -v dnf >/dev/null 2>&1 || PM=yum
+    if [[ "$PM" == dnf ]]; then dnf -q makecache --refresh >/dev/null 2>&1 || true; else yum -q makecache >/dev/null 2>&1 || true; fi
+    while IFS='|' read -r name current; do
+        [[ "$name" =~ ^(php|ea-php|alt-php|lsphp[0-9]|remi-php|rh-php) ]] || continue
+        if [[ "$PM" == dnf ]]; then latest=$(dnf -q repoquery --available --latest-limit=1 --qf '%{version}-%{release}.%{arch}' "$name" 2>/dev/null | head -n1)
+        else latest=$(yum -q --showduplicates list "$name" 2>/dev/null | awk 'NR>1 {v=$2} END{print v}'); fi
+        NAMES+=("$name"); CURRENT+=("$current"); LABELS+=("$(pkg_label "$name")")
+        if [[ -n "$latest" ]]; then LATEST+=("$latest"); [[ "$latest" != "$current" ]] && UPDATES+=("$name")
+        else LATEST+=("không có trong kho"); fi
+    done < <(rpm -qa --qf '%{NAME}|%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -t '|' -k1,1)
+elif command -v dpkg-query >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    PM=apt; apt-get update -qq >/dev/null 2>&1 || true
+    while IFS='|' read -r name current; do
+        [[ "$name" =~ ^(php|ea-php|alt-php|lsphp[0-9]|libapache2-mod-php|libphp[0-9]) ]] || continue
+        latest=$(apt-cache policy "$name" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+        NAMES+=("$name"); CURRENT+=("$current"); LABELS+=("$(pkg_label "$name")")
+        if [[ -n "$latest" && "$latest" != '(none)' ]]; then LATEST+=("$latest"); [[ "$latest" != "$current" ]] && UPDATES+=("$name")
+        else LATEST+=("không có trong kho"); fi
+    done < <(dpkg-query -W -f='${binary:Package}|${Version}\n' 2>/dev/null | sort -t '|' -k1,1)
+else
+    fail "không tìm thấy trình quản lý gói RPM hoặc APT được hỗ trợ."
+fi
+
+if ((${#DA_SOURCE[@]})); then
+    progress 'BƯỚC 4/7' 'Đối chiếu PHP source-managed của DirectAdmin'
+    printf '%-12s %-12s %-12s %s\n' 'PHP' 'ĐANG CÀI' 'MỚI NHẤT' 'KẾT QUẢ'
+    for entry in "${DA_SOURCE[@]}"; do
+        IFS='|' read -r current bin <<< "$entry"
+        if [[ "$current" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]] && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+            minor="${BASH_REMATCH[1]}"
+            json=$(curl -fsS --max-time 15 "https://www.php.net/releases/index.php?json&version=$minor" 2>/dev/null || true)
+            latest=$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))' 2>/dev/null || true)
+            if [[ -n "$latest" ]]; then
+                printf '%-12s %-12s %-12s %s\n' "$minor" "$current" "$latest" "$bin"
+                [[ "$current" == "$latest" ]] || BLOCKS+=("PHP $minor tại $bin đang $current; bản mới nhất là $latest. Đây là PHP source-managed; CustomBuild bị cấm nên script không tự build/cài runtime này.")
+            else
+                printf '%-12s %-12s %-12s %s\n' "$minor" "$current" 'không truy vấn được' "$bin"
+                BLOCKS+=("Không truy vấn được bản mới nhất cho PHP $minor tại php.net.")
+            fi
+        else
+            printf '%-12s %-12s %-12s %s\n' 'không rõ' "$current" 'không rõ' "$bin"
+            BLOCKS+=("Không xác minh được phiên bản PHP source-managed tại $bin.")
+        fi
+    done
+fi
+for entry in "${UNMANAGED[@]}"; do IFS='|' read -r ver bin <<< "$entry"; BLOCKS+=("PHP $ver tại $bin không thuộc package RPM/APT; chưa có adapter cập nhật an toàn."); done
+
+progress 'BƯỚC 5/7' 'Hiển thị package có bản mới trong kho'
+printf '\nPackage PHP (%s):\n' "$PM"
+shown=0
+if ((${#NAMES[@]})); then
+    printf '%-10s %-34s %-28s %-28s\n' 'PHP' 'PACKAGE' 'ĐANG CÀI' 'MỚI NHẤT TRONG KHO'
+    for i in "${!NAMES[@]}"; do
+        [[ "${LATEST[$i]}" != "không có trong kho" && "${CURRENT[$i]}" != "${LATEST[$i]}" ]] || continue
+        printf '%-10s %-34s %-28s %-28s\n' "${LABELS[$i]}" "${NAMES[$i]}" "${CURRENT[$i]}" "${LATEST[$i]}"
+        ((shown+=1))
+    done
+fi
+if ((shown == 0)); then
+    if ((${#NAMES[@]})); then echo "Các package PHP có bản đối chiếu trong kho đều đã mới nhất; không có package nào cần nâng cấp."
+    else echo "Không thấy package PHP RPM/APT đã cài. Xem danh sách runtime source-managed phía trên nếu có."; fi
+fi
+
+if ((${#BLOCKS[@]})); then
+    progress 'DỪNG AN TOÀN' 'Có PHP source-managed hoặc runtime chưa được package manager quản lý'
+    for reason in "${BLOCKS[@]}"; do printf '  - %s\n' "$reason"; done
+    echo "Chưa cập nhật package nào để tránh nâng cấp dở dang. DirectAdmin CustomBuild không được gọi."
+    exit 5
+fi
+if ((${#UPDATES[@]} == 0)); then echo "Không có package PHP cần cập nhật."; exit 0; fi
+
+progress 'BƯỚC 6/7' 'Chờ xác nhận cập nhật'
+echo "Sẽ chỉ cập nhật các package PHP đang hiển thị. Không gọi DirectAdmin CustomBuild."
+read -r -p "Xác nhận cập nhật? [y/N] " answer
+case "$answer" in y|Y|yes|YES|Yes|c|C|co|Co|CO|có|Có|CÓ) ;; *) echo "Đã hủy; chưa cập nhật package nào."; exit 0;; esac
+
+progress 'BƯỚC 7/7' 'Cập nhật và xác minh từng package'
+log=/var/log/vnode-direct-php-updater.log
+if [[ "$PM" == apt ]]; then DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade "${UPDATES[@]}" >"$log" 2>&1; rc=$?
+elif [[ "$PM" == dnf ]]; then dnf upgrade -y "${UPDATES[@]}" >"$log" 2>&1; rc=$?
+else yum update -y "${UPDATES[@]}" >"$log" 2>&1; rc=$?; fi
+echo "Log package: $log"
+failed=0
+printf '\n%-10s %-34s %-28s %-28s %-16s\n' 'PHP' 'PACKAGE' 'TRƯỚC' 'SAU' 'KẾT QUẢ'
+for pkg in "${UPDATES[@]}"; do
+    idx=0; for i in "${!NAMES[@]}"; do [[ "${NAMES[$i]}" == "$pkg" ]] && { idx=$i; break; }; done
+    before="${CURRENT[$idx]}"; expected="${LATEST[$idx]}"
+    if [[ "$PM" == apt ]]; then after=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo unknown)
+    else after=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "$pkg" 2>/dev/null || echo unknown); fi
+    result='THÀNH CÔNG'
+    if ((rc != 0)) || [[ "$after" != "$expected" ]]; then result='CHƯA XÁC MINH'; failed=1; fi
+    printf '%-10s %-34s %-28s %-28s %-16s\n' "${LABELS[$idx]}" "$pkg" "$before" "$after" "$result"
+done
+if ((failed)); then echo "Một số package chưa đạt bản mới nhất dự kiến. Kiểm tra $log"; exit 4; fi
+echo "Đã cập nhật và xác minh các package PHP được liệt kê."

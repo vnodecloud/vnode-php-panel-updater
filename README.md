@@ -1,49 +1,36 @@
-# VNode PHP Panel Updater
+# VNode PHP Updaters
 
-Bash script kiểm tra các PHP runtime và package PHP trên máy chủ Linux có control panel, hiển thị bản đang cài cùng bản mới nhất trong kho, rồi chỉ cập nhật sau khi người vận hành xác nhận.
+Hai script Bash độc lập để kiểm tra và cập nhật PHP theo từng control panel. Mỗi script chỉ hỗ trợ đúng panel ghi trong tên và yêu cầu quyền `root`.
 
-## Chạy nhanh
+## DirectAdmin
 
-Trên máy chủ khách hàng, chạy lệnh sau trong terminal tương tác:
+Script `vnode-direct-php-updater` rà package PHP đã cài qua RPM/APT, đối chiếu phiên bản mới nhất trong kho, chỉ hiện package cần cập nhật, hỏi xác nhận rồi cập nhật và xác minh kết quả. Script không gọi DirectAdmin CustomBuild.
 
-```bash
-tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL "https://raw.githubusercontent.com/vnodecloud/vnode-php-panel-updater/main/php-panel-updater.sh" -o "$tmp" && sudo bash "$tmp"
-```
+PHP source-managed trong `/usr/local/phpXX` được nhận diện riêng. Vì không sử dụng CustomBuild, script không tự build hoặc thay thế các runtime source-managed; nếu chúng cần cập nhật, script nêu phiên bản đối chiếu rồi dừng trước khi cập nhật package nào.
 
-Lệnh này tải script vào file tạm rồi chạy bằng `sudo`; file tạm được xóa khi lệnh kết thúc. Cần có `curl` và quyền `sudo`. Có thể tải script, đọc nội dung và kiểm tra trước khi chạy:
+Chạy trực tiếp trên máy chủ:
 
 ```bash
-curl -fsSLO "https://raw.githubusercontent.com/vnodecloud/vnode-php-panel-updater/main/php-panel-updater.sh"
-less php-panel-updater.sh
-sudo bash php-panel-updater.sh
+tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL "https://raw.githubusercontent.com/vnodecloud/vnode-php-panel-updater/main/vnode-direct-php-updater" -o "$tmp" && bash "$tmp"
 ```
 
-Script yêu cầu quyền root và hiển thị câu hỏi xác nhận trước khi cài đặt package. Chỉ trả lời xác nhận khi đã xem danh sách cập nhật và hiểu tác động với máy chủ.
+## CyberPanel
 
-## Chức năng
+Script `vnode-cyberpanel-php-updater` rà runtime LiteSpeed PHP dưới `/usr/local/lsws/lsphpXX`, đối chiếu các package `lsphp` đã cài qua RPM/APT, chỉ hiện package cần cập nhật, hỏi xác nhận rồi cập nhật và xác minh kết quả. Các runtime không thuộc package manager khiến script dừng trước khi thay đổi package.
 
-- Nhận diện hệ điều hành, control panel và web server đang chạy.
-- Quét PHP runtime ở các đường dẫn selector phổ biến của panel.
-- Liệt kê phiên bản package PHP đang cài và phiên bản mới nhất có trong kho hệ điều hành. Bảng chỉ hiện package có phiên bản trong kho khác bản đang cài.
-- Với runtime do aaPanel App Store quản lý và PHP riêng của HestiaCP, dùng updater native tương ứng khi script nhận diện được.
-- Với DirectAdmin, nhận diện các binary `/usr/local/phpXX/bin/php` là PHP source-managed, tra bản phát hành mới nhất từ PHP.net và hiển thị riêng để đối chiếu.
-- Cập nhật package qua APT, DNF hoặc YUM sau khi người vận hành xác nhận.
-- Hiển thị tiến trình từng bước, xác minh phiên bản sau cập nhật và ghi log chi tiết vào `/var/log/php-panel-updater-*.log`.
-- Dừng trước khi cập nhật package nếu phát hiện PHP runtime cài riêng mà chưa có phương thức cập nhật native được script hỗ trợ.
+Chạy trực tiếp trên máy chủ:
 
-## Control panel nhận diện
+```bash
+tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL "https://raw.githubusercontent.com/vnodecloud/vnode-php-panel-updater/main/vnode-cyberpanel-php-updater" -o "$tmp" && bash "$tmp"
+```
 
-DirectAdmin, CyberPanel, aaPanel, VestaCP, CloudPanel, FastPanel, HestiaCP và Webmin. CWP không nằm trong phạm vi hỗ trợ.
+## Hành vi chung
 
-## Lưu ý
+- Hiển thị tiến trình bằng tiếng Việt và thông tin hệ điều hành.
+- Chỉ hiển thị package PHP có phiên bản mới hơn trong kho đã cấu hình.
+- Không cập nhật nếu người vận hành không xác nhận.
+- Chỉ cập nhật package PHP liên quan đến panel; không chạy nâng cấp toàn hệ điều hành.
+- Ghi log trình quản lý package vào `/var/log/vnode-direct-php-updater.log` hoặc `/var/log/vnode-cyberpanel-php-updater.log`.
+- Cần Bash, quyền `root`, `curl` trên máy chạy lệnh tải script, và APT hoặc RPM với DNF/YUM.
 
-- DirectAdmin CustomBuild không được gọi. PHP source-managed ở `/usr/local/phpXX` vẫn được phát hiện và so sánh phiên bản; nếu có bản mới, script sẽ nêu rõ và dừng an toàn thay vì báo không có PHP hoặc cập nhật runtime đó.
-- Script chỉ quét các đường dẫn PHP đã biết. Runtime được cài ở đường dẫn tùy chỉnh có thể không được phát hiện.
-- Các phiên bản mới nhất được xác định theo kho package mà hệ điều hành đang cấu hình. Với PHP do aaPanel quản lý riêng, script tra phiên bản phát hành PHP và xác minh kết quả sau khi updater chạy.
-- Lệnh chạy nhanh lấy nội dung hiện tại trên nhánh `main`. Để khách hàng dùng một bản cố định, hãy phát hành GitHub Release/tag và đổi `main` trong URL thành tag, ví dụ `v1.0.0`.
-- Chạy script với quyền root có thể thay đổi package và dịch vụ trên máy chủ. Hãy đọc nội dung script và sao lưu máy chủ theo quy trình vận hành của bạn trước khi xác nhận cập nhật.
-
-## Tệp
-
-- `php-panel-updater.sh` — script kiểm tra và cập nhật PHP.
-- `README.md` — hướng dẫn sử dụng.
+Để kiểm tra nội dung trước khi chạy, tải script về máy chủ và đọc file thay vì dùng lệnh chạy nhanh. Hai script tải từ nhánh `main`; có thể ghim URL vào Git tag/release khi cần chạy một phiên bản cố định.

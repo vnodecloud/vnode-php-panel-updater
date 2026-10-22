@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -o pipefail
+export LC_ALL=C
+
+progress() { printf '\n[%s] %s\n' "$1" "$2"; }
+fail() { echo "LỖI: $*" >&2; exit 1; }
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "hãy chạy bằng quyền root (sudo bash $0)."
+[[ -d /usr/local/CyberCP || -d /usr/local/CyberPanel ]] || { echo "Không hỗ trợ: không phát hiện CyberPanel."; exit 2; }
+if command -v flock >/dev/null 2>&1; then
+    exec 9>/run/lock/vnode-cyberpanel-php-updater.lock
+    flock -n 9 || fail "đang có một phiên cập nhật PHP khác chạy."
+fi
+
+progress 'BƯỚC 1/6' 'Nhận diện CyberPanel và hệ điều hành'
+if [[ -r /etc/os-release ]]; then . /etc/os-release; OS_NAME="${PRETTY_NAME:-${NAME:-Linux}}"; else OS_NAME="Linux"; fi
+echo "Hệ điều hành  : $OS_NAME"
+echo "Control panel : CyberPanel"
+
+progress 'BƯỚC 2/6' 'Quét các PHP LiteSpeed đang có trong máy'
+declare -a RUNTIMES=() UNMANAGED=()
+for bin in /usr/local/lsws/lsphp*/bin/php; do
+    [[ -x "$bin" ]] || continue
+    version=$("$bin" -n -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION.".".PHP_RELEASE_VERSION;' 2>/dev/null | head -n1)
+    [[ -n "$version" ]] || version='không rõ'
+    real=$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")
+    owner=''
+    if command -v rpm >/dev/null 2>&1; then owner=$(rpm -qf "$real" 2>/dev/null || true)
+    elif command -v dpkg-query >/dev/null 2>&1; then owner=$(dpkg-query -S "$real" 2>/dev/null | head -n1 || true); fi
+    RUNTIMES+=("$version|$bin")
+    [[ -n "$owner" ]] || UNMANAGED+=("$version|$bin")
+done
+if ((${#RUNTIMES[@]})); then
+    printf '%-14s %s\n' 'PHP HIỆN TẠI' 'BINARY SELECTOR'
+    for entry in "${RUNTIMES[@]}"; do IFS='|' read -r version bin <<< "$entry"; printf '%-14s %s\n' "$version" "$bin"; done
+else
+    echo 'Không thấy runtime tại /usr/local/lsws/lsphp*/bin/php.'
+fi
+
+progress 'BƯỚC 3/6' 'Làm mới metadata và đối chiếu package LiteSpeed PHP'
+declare -a NAMES=() CURRENT=() LATEST=() UPDATES=() BLOCKS=()
+pkg_php_version() {
+    local n="$1"
+    if [[ "$n" =~ ^lsphp([0-9])([0-9]) ]]; then echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"; else echo 'không rõ'; fi
+}
+if command -v rpm >/dev/null 2>&1; then
+    if command -v dnf >/dev/null 2>&1; then
+        PM=dnf; dnf -q makecache --refresh >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        PM=yum; yum -q makecache >/dev/null 2>&1 || true
+    else fail 'đã phát hiện RPM nhưng không có DNF hoặc YUM.'; fi
+    while IFS='|' read -r name current; do
+        [[ "$name" =~ ^lsphp[0-9]{2}($|[-_]) ]] || continue
+        if [[ "$PM" == dnf ]]; then
+            latest=$(dnf -q repoquery --available --latest-limit=1 --qf '%{version}-%{release}.%{arch}' "$name" 2>/dev/null | head -n1)
+        else
+            latest=$(yum -q --showduplicates list "$name" 2>/dev/null | awk 'NR>1 {v=$2} END{print v}')
+        fi
+        NAMES+=("$name"); CURRENT+=("$current")
+        if [[ -n "$latest" ]]; then LATEST+=("$latest"); [[ "$latest" != "$current" ]] && UPDATES+=("$name")
+        else LATEST+=('không có trong kho'); fi
+    done < <(rpm -qa --qf '%{NAME}|%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort -t '|' -k1,1)
+elif command -v dpkg-query >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    PM=apt; apt-get update -qq >/dev/null 2>&1 || true
+    while IFS='|' read -r name current; do
+        [[ "$name" =~ ^lsphp[0-9]{2}($|[-:]) ]] || continue
+        latest=$(apt-cache policy "$name" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+        NAMES+=("$name"); CURRENT+=("$current")
+        if [[ -n "$latest" && "$latest" != '(none)' ]]; then LATEST+=("$latest"); [[ "$latest" != "$current" ]] && UPDATES+=("$name")
+        else LATEST+=('không có trong kho'); fi
+    done < <(dpkg-query -W -f='${binary:Package}|${Version}\n' 2>/dev/null | sort -t '|' -k1,1)
+else
+    fail 'không tìm thấy trình quản lý gói RPM hoặc APT được hỗ trợ.'
+fi
+
+progress 'BƯỚC 4/6' 'Hiển thị package PHP cần cập nhật'
+printf '\nPackage LiteSpeed PHP (%s):\n' "$PM"
+shown=0
+if ((${#NAMES[@]})); then
+    printf '%-10s %-34s %-28s %-28s\n' 'PHP' 'PACKAGE' 'ĐANG CÀI' 'MỚI NHẤT TRONG KHO'
+    for i in "${!NAMES[@]}"; do
+        [[ "${LATEST[$i]}" != 'không có trong kho' && "${CURRENT[$i]}" != "${LATEST[$i]}" ]] || continue
+        printf '%-10s %-34s %-28s %-28s\n' "$(pkg_php_version "${NAMES[$i]}")" "${NAMES[$i]}" "${CURRENT[$i]}" "${LATEST[$i]}"
+        ((shown+=1))
+    done
+fi
+((shown)) || echo 'Các package LiteSpeed PHP đã mới nhất hoặc không có bản đối chiếu trong kho.'
+
+for entry in "${UNMANAGED[@]}"; do IFS='|' read -r version bin <<< "$entry"; BLOCKS+=("PHP $version tại $bin không thuộc package RPM/APT; script không thể xác minh/cập nhật an toàn."); done
+if ((${#BLOCKS[@]})); then
+    progress 'DỪNG AN TOÀN' 'Có runtime LiteSpeed PHP không thuộc package manager'
+    for reason in "${BLOCKS[@]}"; do printf '  - %s\n' "$reason"; done
+    echo 'Chưa cập nhật package nào.'
+    exit 5
+fi
+if ((${#UPDATES[@]} == 0)); then echo 'Không có package LiteSpeed PHP cần cập nhật.'; exit 0; fi
+
+progress 'BƯỚC 5/6' 'Chờ xác nhận cập nhật'
+echo 'Chỉ các package đang hiển thị sẽ được cập nhật; không cập nhật toàn hệ điều hành.'
+read -r -p 'Xác nhận cập nhật? [y/N] ' answer
+case "$answer" in y|Y|yes|YES|Yes|c|C|co|Co|CO|có|Có|CÓ) ;; *) echo 'Đã hủy; chưa cập nhật package nào.'; exit 0;; esac
+
+progress 'BƯỚC 6/6' 'Cập nhật package và xác minh phiên bản'
+log=/var/log/vnode-cyberpanel-php-updater.log
+if [[ "$PM" == apt ]]; then DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade "${UPDATES[@]}" >"$log" 2>&1; rc=$?
+elif [[ "$PM" == dnf ]]; then dnf upgrade -y "${UPDATES[@]}" >"$log" 2>&1; rc=$?
+else yum update -y "${UPDATES[@]}" >"$log" 2>&1; rc=$?; fi
+echo "Log package: $log"
+failed=0
+printf '\n%-10s %-34s %-28s %-28s %-16s\n' 'PHP' 'PACKAGE' 'TRƯỚC' 'SAU' 'KẾT QUẢ'
+for pkg in "${UPDATES[@]}"; do
+    idx=0; for i in "${!NAMES[@]}"; do [[ "${NAMES[$i]}" == "$pkg" ]] && { idx=$i; break; }; done
+    before="${CURRENT[$idx]}"; expected="${LATEST[$idx]}"
+    if [[ "$PM" == apt ]]; then after=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo unknown)
+    else after=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "$pkg" 2>/dev/null || echo unknown); fi
+    result='THÀNH CÔNG'
+    if ((rc != 0)) || [[ "$after" != "$expected" ]]; then result='CHƯA XÁC MINH'; failed=1; fi
+    printf '%-10s %-34s %-28s %-28s %-16s\n' "$(pkg_php_version "$pkg")" "$pkg" "$before" "$after" "$result"
+done
+if ((failed)); then echo "Một số package chưa đạt bản mới nhất dự kiến. Kiểm tra $log"; exit 4; fi
+echo 'Đã cập nhật và xác minh các package LiteSpeed PHP được liệt kê.'
