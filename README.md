@@ -1,4 +1,4 @@
-# vNode PHP Panel Updater
+# VNode PHP Panel Updater
 
 Bash script kiểm tra các PHP runtime và package PHP trên máy chủ Linux có control panel, hiển thị bản đang cài cùng bản mới nhất trong kho, rồi chỉ cập nhật sau khi người vận hành xác nhận.
 
@@ -26,16 +26,18 @@ Script yêu cầu quyền root và hiển thị câu hỏi xác nhận trước 
 - Quét PHP runtime ở các đường dẫn selector phổ biến của panel.
 - Liệt kê phiên bản package PHP đang cài và phiên bản mới nhất có trong kho hệ điều hành. Bảng chỉ hiện package có phiên bản trong kho khác bản đang cài.
 - Với runtime do aaPanel App Store quản lý và PHP riêng của HestiaCP, dùng updater native tương ứng khi script nhận diện được.
+- Với DirectAdmin, nhận diện các binary `/usr/local/phpXX/bin/php` là PHP source-managed, tra bản phát hành mới nhất từ PHP.net và hiển thị riêng để đối chiếu.
 - Cập nhật package qua APT, DNF hoặc YUM sau khi người vận hành xác nhận.
 - Hiển thị tiến trình từng bước, xác minh phiên bản sau cập nhật và ghi log chi tiết vào `/var/log/php-panel-updater-*.log`.
 - Dừng trước khi cập nhật package nếu phát hiện PHP runtime cài riêng mà chưa có phương thức cập nhật native được script hỗ trợ.
 
 ## Control panel nhận diện
 
-DirectAdmin, CyberPanel, aaPanel, VestaCP, CloudPanel, FastPanel, HestiaCP và Webmin. 
+DirectAdmin, CyberPanel, aaPanel, VestaCP, CloudPanel, FastPanel, HestiaCP và Webmin. CWP không nằm trong phạm vi hỗ trợ.
 
 ## Lưu ý
 
+- DirectAdmin CustomBuild không được gọi. PHP source-managed ở `/usr/local/phpXX` vẫn được phát hiện và so sánh phiên bản; nếu có bản mới, script sẽ nêu rõ và dừng an toàn thay vì báo không có PHP hoặc cập nhật runtime đó.
 - Script chỉ quét các đường dẫn PHP đã biết. Runtime được cài ở đường dẫn tùy chỉnh có thể không được phát hiện.
 - Các phiên bản mới nhất được xác định theo kho package mà hệ điều hành đang cấu hình. Với PHP do aaPanel quản lý riêng, script tra phiên bản phát hành PHP và xác minh kết quả sau khi updater chạy.
 - Lệnh chạy nhanh lấy nội dung hiện tại trên nhánh `main`. Để khách hàng dùng một bản cố định, hãy phát hành GitHub Release/tag và đổi `main` trong URL thành tag, ví dụ `v1.0.0`.

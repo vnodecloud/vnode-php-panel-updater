@@ -14,7 +14,12 @@ if [[ -r /etc/os-release ]]; then . /etc/os-release; OS_NAME="${PRETTY_NAME:-${N
 
 PANEL=""; PANEL_VERSION="unknown"
 if [[ -x /usr/local/directadmin/directadmin || -d /usr/local/directadmin/data ]]; then
-    PANEL="DirectAdmin"; PANEL_VERSION=$(/usr/local/directadmin/directadmin version 2>/dev/null | head -n1 || true)
+    PANEL="DirectAdmin"; PANEL_VERSION=""
+    for da_version_arg in version v; do
+        da_version_output=$(/usr/local/directadmin/directadmin "$da_version_arg" 2>/dev/null | head -n1 || true)
+        if [[ -n "$da_version_output" && "$da_version_output" != Usage:* ]]; then PANEL_VERSION="$da_version_output"; break; fi
+    done
+    [[ -n "$PANEL_VERSION" ]] || PANEL_VERSION="không rõ phiên bản"
 elif [[ -d /usr/local/CyberCP ]]; then PANEL="CyberPanel"
 elif [[ -d /www/server/panel ]]; then PANEL="aaPanel"
 elif [[ -d /usr/local/hestia ]]; then PANEL="HestiaCP"; PANEL_VERSION=$(/usr/local/hestia/bin/v-list-sys-info 2>/dev/null | awk -F': ' '/VERSION/ {print $2; exit}' || true)
@@ -44,7 +49,7 @@ echo "Control panel    : $PANEL${PANEL_VERSION:+ ($PANEL_VERSION)}"
 echo "Web server       : $WEB_SERVER"
 
 progress 'BƯỚC 3/8' 'Quét PHP runtime trong các đường dẫn panel và selector phổ biến'
-declare -a SELECTOR_PATHS=() SOURCE_PATHS=() AA_SOURCE_VERSIONS=() HESTIA_PHP_BIN=()
+declare -a SELECTOR_PATHS=() SOURCE_PATHS=() AA_SOURCE_VERSIONS=() HESTIA_PHP_BIN=() DA_SOURCE_BINS=()
 add_runtime() {
     local bin="$1" ver old entry owner rel
     [[ -x "$bin" ]] || return 0
@@ -64,6 +69,9 @@ add_runtime() {
     elif [[ "$bin" == /usr/local/hestia/php/sbin/hestia-php ]]; then
         HESTIA_PHP_BIN+=("$bin")
         SOURCE_PATHS+=("$ver|$bin|HestiaCP updater")
+    elif [[ "$PANEL" == "DirectAdmin" && "$bin" == /usr/local/php*/bin/php ]]; then
+        DA_SOURCE_BINS+=("$ver|$bin")
+        SOURCE_PATHS+=("$ver|$bin|DirectAdmin PHP source (CustomBuild bị cấm)")
     elif [[ -z "$owner" ]]; then SOURCE_PATHS+=("$ver|$bin|không thuộc package RPM/APT")
     fi
 }
@@ -135,6 +143,33 @@ if ((${#AA_SOURCE_VERSIONS[@]})); then
     fi
 fi
 
+if ((${#DA_SOURCE_BINS[@]})); then
+    progress 'BƯỚC 5/8' 'Đối chiếu PHP source-managed của DirectAdmin với bản phát hành PHP mới nhất'
+    printf '%-12s %-12s %-12s %s\n' 'PHP' 'ĐANG CÀI' 'MỚI NHẤT' 'ĐƯỜNG DẪN'
+    printf '%-12s %-12s %-12s %s\n' '------------' '------------' '------------' '----------------------------------------'
+    for item in "${DA_SOURCE_BINS[@]}"; do
+        IFS='|' read -r current bin <<< "$item"
+        if [[ ! "$current" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+            printf '%-12s %-12s %-12s %s\n' 'không rõ' "$current" 'không rõ' "$bin"
+            SOURCE_BLOCKED+=("Không đọc được phiên bản PHP source-managed tại $bin")
+            continue
+        fi
+        minor="${BASH_REMATCH[1]}"
+        json=$(curl -fsS --max-time 15 "https://www.php.net/releases/index.php?json&version=$minor" 2>/dev/null || true)
+        latest=""
+        if [[ -n "$json" ]] && command -v python3 >/dev/null 2>&1; then latest=$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))' 2>/dev/null || true); fi
+        if [[ -z "$latest" ]]; then
+            printf '%-12s %-12s %-12s %s\n' "$minor" "$current" 'không truy vấn được' "$bin"
+            SOURCE_BLOCKED+=("Không tra được phiên bản PHP mới nhất cho PHP $minor tại php.net")
+            continue
+        fi
+        printf '%-12s %-12s %-12s %s\n' "$minor" "$current" "$latest" "$bin"
+        if [[ "$current" != "$latest" ]]; then
+            SOURCE_BLOCKED+=("DirectAdmin PHP $minor đang ở $current; bản PHP mới nhất là $latest. Đây là PHP source-managed; CustomBuild đang bị cấm nên script không thể cập nhật an toàn runtime này.")
+        fi
+    done
+fi
+
 if ((${#HESTIA_PHP_BIN[@]})) && { [[ "$PANEL" != "HestiaCP" ]] || [[ ! -x /usr/local/hestia/bin/v-update-sys-hestia ]]; }; then
     SOURCE_BLOCKED+=("Không tìm thấy updater native HestiaCP cho PHP riêng của panel")
 fi
@@ -149,7 +184,7 @@ fi
 
 for entry in "${SOURCE_PATHS[@]}"; do
     IFS='|' read -r ver path manager <<< "$entry"
-    [[ "$manager" == "aaPanel App Store" || "$manager" == "HestiaCP updater" ]] && continue
+    [[ "$manager" == "aaPanel App Store" || "$manager" == "HestiaCP updater" || "$manager" == "DirectAdmin PHP source (CustomBuild bị cấm)" ]] && continue
     SOURCE_BLOCKED+=("PHP $ver tại $path không có adapter cập nhật native đã xác thực")
 done
 
@@ -175,7 +210,11 @@ elif ((package_available_count)); then
 elif ((${#PKG_NAMES[@]})); then
     echo "Không có package PHP nào tìm thấy phiên bản đối chiếu trong kho."
 else
-    echo "Không phát hiện package PHP do trình quản lý gói của hệ điều hành quản lý."
+    if ((${#SELECTOR_PATHS[@]})); then
+        echo "Đã phát hiện ${#SELECTOR_PATHS[@]} PHP runtime ở BƯỚC 3, nhưng không có package PHP RPM/APT tương ứng; xem bảng PHP source-managed ở trên."
+    else
+        echo "Không phát hiện package PHP do trình quản lý gói của hệ điều hành quản lý."
+    fi
 fi
 echo
 if ((${#SOURCE_BLOCKED[@]})); then
