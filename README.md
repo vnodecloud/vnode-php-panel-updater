@@ -1,4 +1,4 @@
-# VNode PHP Panel Updater
+# vNode PHP Panel Updater
 
 Bash script kiểm tra các PHP runtime và package PHP trên máy chủ Linux có control panel, hiển thị bản đang cài cùng bản mới nhất trong kho, rồi chỉ cập nhật sau khi người vận hành xác nhận.
 
